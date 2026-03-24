@@ -1,6 +1,15 @@
 import java.util.*;
 
 /**
+ * Custom Exception for Invalid Booking Scenarios
+ */
+class InvalidBookingException extends Exception {
+    public InvalidBookingException(String message) {
+        super(message);
+    }
+}
+
+/**
  * Abstract Room class (Domain Model)
  */
 abstract class Room {
@@ -16,27 +25,25 @@ abstract class Room {
 
     public String getType() { return type; }
     public double getPrice() { return price; }
-
-    public abstract void displayDetails();
 }
 
+/**
+ * Concrete Room Types
+ */
 class SingleRoom extends Room {
     public SingleRoom() { super("Single Room", 1, 2000.0); }
-    public void displayDetails() { System.out.println(getType() + " | ₹" + getPrice()); }
 }
 
 class DoubleRoom extends Room {
     public DoubleRoom() { super("Double Room", 2, 3500.0); }
-    public void displayDetails() { System.out.println(getType() + " | ₹" + getPrice()); }
 }
 
 class SuiteRoom extends Room {
     public SuiteRoom() { super("Suite Room", 3, 6000.0); }
-    public void displayDetails() { System.out.println(getType() + " | ₹" + getPrice()); }
 }
 
 /**
- * Reservation with reservationId
+ * Reservation Entity
  */
 class Reservation {
     private String reservationId;
@@ -59,15 +66,12 @@ class Reservation {
 }
 
 /**
- * Booking Request Queue (FIFO)
+ * Booking Request Queue
  */
 class BookingRequestQueue {
     private Queue<Reservation> queue = new LinkedList<>();
-
     public void addRequest(Reservation r) { queue.offer(r); }
-
     public Reservation getNextRequest() { return queue.poll(); }
-
     public boolean isEmpty() { return queue.isEmpty(); }
 }
 
@@ -85,13 +89,44 @@ class RoomInventory {
 
     public int getAvailability(String type) { return availability.getOrDefault(type, 0); }
 
-    public void reduceAvailability(String type) {
-        availability.put(type, getAvailability(type) - 1);
+    public void reduceAvailability(String type) throws InvalidBookingException {
+        int current = getAvailability(type);
+        if (current <= 0) {
+            throw new InvalidBookingException("Cannot reduce availability below zero for " + type);
+        }
+        availability.put(type, current - 1);
     }
 }
 
 /**
- * Booking Service (Safe Allocation)
+ * Booking Validator (Fail-Fast)
+ */
+class BookingValidator {
+
+    private Set<String> validRoomTypes;
+
+    public BookingValidator() {
+        validRoomTypes = Set.of("Single Room", "Double Room", "Suite Room");
+    }
+
+    public void validateReservation(Reservation r, RoomInventory inventory) throws InvalidBookingException {
+        // Validate room type
+        if (!validRoomTypes.contains(r.getRoomType())) {
+            throw new InvalidBookingException("Invalid room type: " + r.getRoomType());
+        }
+        // Check inventory
+        if (inventory.getAvailability(r.getRoomType()) <= 0) {
+            throw new InvalidBookingException("No availability for " + r.getRoomType());
+        }
+        // Validate guest name
+        if (r.getGuestName() == null || r.getGuestName().isBlank()) {
+            throw new InvalidBookingException("Guest name cannot be empty");
+        }
+    }
+}
+
+/**
+ * Booking Service with Validation
  */
 class BookingService {
 
@@ -103,31 +138,43 @@ class BookingService {
     // Booking history
     private List<Reservation> bookingHistory = new ArrayList<>();
 
-    public BookingService(RoomInventory inventory) { this.inventory = inventory; }
+    private BookingValidator validator;
+
+    public BookingService(RoomInventory inventory, BookingValidator validator) {
+        this.inventory = inventory;
+        this.validator = validator;
+    }
 
     public void processBookings(BookingRequestQueue queue) {
+
         while (!queue.isEmpty()) {
             Reservation r = queue.getNextRequest();
-            String type = r.getRoomType();
 
-            if (inventory.getAvailability(type) <= 0) {
-                System.out.println("❌ No availability for " + r.getGuestName());
-                continue;
+            try {
+                // Validate before processing
+                validator.validateReservation(r, inventory);
+
+                // Generate unique room ID
+                String roomId = generateRoomId(r.getRoomType());
+
+                // Atomic allocation
+                allocatedRoomIds.add(roomId);
+                allocations.computeIfAbsent(r.getRoomType(), k -> new HashSet<>()).add(roomId);
+
+                // Reduce inventory safely
+                inventory.reduceAvailability(r.getRoomType());
+
+                // Record in history
+                bookingHistory.add(r);
+
+                System.out.println("✅ Booking Confirmed | ResID: " + r.getReservationId()
+                        + " | RoomID: " + roomId);
+
+            } catch (InvalidBookingException e) {
+                System.out.println("❌ Booking Failed for " + r.getGuestName() + " | Reason: " + e.getMessage());
+            } catch (Exception e) {
+                System.out.println("❌ Unexpected error: " + e.getMessage());
             }
-
-            String roomId = generateRoomId(type);
-            if (allocatedRoomIds.contains(roomId)) continue;
-
-            // Allocate
-            allocatedRoomIds.add(roomId);
-            allocations.computeIfAbsent(type, k -> new HashSet<>()).add(roomId);
-            inventory.reduceAvailability(type);
-
-            // Record in history
-            bookingHistory.add(r);
-
-            System.out.println("✅ Booking Confirmed | ResID: " + r.getReservationId()
-                    + " | RoomID: " + roomId);
         }
     }
 
@@ -135,36 +182,29 @@ class BookingService {
         return type.substring(0, 3).toUpperCase() + "-" + (roomCounter++);
     }
 
-    // Access booking history (read-only)
     public List<Reservation> getBookingHistory() {
         return Collections.unmodifiableList(bookingHistory);
     }
 }
 
 /**
- * Booking Report Service (Read-only reporting)
+ * Booking Report Service
  */
 class BookingReportService {
 
     private List<Reservation> bookingHistory;
 
-    public BookingReportService(List<Reservation> bookingHistory) {
-        this.bookingHistory = bookingHistory;
-    }
+    public BookingReportService(List<Reservation> bookingHistory) { this.bookingHistory = bookingHistory; }
 
-    // Display all reservations in chronological order
     public void displayAllBookings() {
         System.out.println("\n=== Booking History ===");
         if (bookingHistory.isEmpty()) {
             System.out.println("No bookings yet.");
             return;
         }
-        for (Reservation r : bookingHistory) {
-            r.display();
-        }
+        for (Reservation r : bookingHistory) { r.display(); }
     }
 
-    // Generate a summary: number of bookings per room type
     public void displaySummaryReport() {
         System.out.println("\n=== Booking Summary ===");
         Map<String, Integer> summary = new HashMap<>();
@@ -184,29 +224,26 @@ public class BookMyStay {
 
     public static void main(String[] args) {
 
-        // Setup
         RoomInventory inventory = new RoomInventory();
         BookingRequestQueue queue = new BookingRequestQueue();
-        BookingService bookingService = new BookingService(inventory);
+        BookingValidator validator = new BookingValidator();
+        BookingService bookingService = new BookingService(inventory, validator);
 
-        // Sample reservations
-        Reservation r1 = new Reservation("RES-101", "Alice", "Single Room");
-        Reservation r2 = new Reservation("RES-102", "Bob", "Double Room");
-        Reservation r3 = new Reservation("RES-103", "Charlie", "Single Room"); // exceeds availability
+        // Sample Reservations (some invalid)
+        queue.addRequest(new Reservation("RES-101", "Alice", "Single Room"));
+        queue.addRequest(new Reservation("RES-102", "Bob", "Double Room"));
+        queue.addRequest(new Reservation("RES-103", "Charlie", "Single Room")); // exceeds availability
+        queue.addRequest(new Reservation("RES-104", "", "Suite Room")); // invalid guest name
+        queue.addRequest(new Reservation("RES-105", "Eve", "Penthouse")); // invalid room type
 
-        // Add to queue
-        queue.addRequest(r1);
-        queue.addRequest(r2);
-        queue.addRequest(r3);
-
-        // Process bookings
+        // Process bookings with validation
         bookingService.processBookings(queue);
 
-        // Access booking history
+        // Reports
         BookingReportService reportService = new BookingReportService(bookingService.getBookingHistory());
         reportService.displayAllBookings();
         reportService.displaySummaryReport();
 
-        System.out.println("\n✅ Historical tracking complete. Inventory state preserved.");
+        System.out.println("\n✅ Booking system remains stable after handling errors.");
     }
 }
